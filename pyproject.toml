@@ -27,6 +27,8 @@ all = []
 [tool.poetry.group.dev.dependencies]
 black = { extras = ["jupyter"], version = "*" }
 isort = "*"
+lines-of-work = { git = "https://github.com/allen2c/lines-of-work.git" }
+mkdocs-material = "*"
 poetry-plugin-export = "*"
 pytest = "*"
 pytest-asyncio = "*"
