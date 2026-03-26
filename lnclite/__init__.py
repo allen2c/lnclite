@@ -1,8 +1,10 @@
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Optional, Text
+from typing import TYPE_CHECKING, Dict, Final, List, Optional, Text, Type
 
 import lancedb
+from lancedb.pydantic import LanceModel, Vector
+from pydantic import Field
 
 if TYPE_CHECKING:
     from openai_embeddings_model import AsyncOpenAIEmbeddingsModel, ModelSettings
@@ -11,6 +13,28 @@ if TYPE_CHECKING:
 __version__: Final[Text] = "0.1.0"
 
 logger = logging.getLogger(__name__)
+
+
+def gen_id() -> str:
+    from lnclite.utils.snowflake import generate_id
+
+    return generate_id()
+
+
+def get_document_model(dim: int) -> Type[LanceModel]:
+    class Document(LanceModel):
+        id: Text = Field(default_factory=gen_id)
+        vector: Vector(dim)
+        tags: List[Text] = Field(default_factory=list)
+        metadata: Dict[Text, Text] = Field(default_factory=dict)
+
+    return Document
+
+
+class ManifestModel(LanceModel):
+    id: Text = Field(default_factory=gen_id)
+    last_fingerprint: Optional[Text] = Field(default=None)
+    last_updated: Optional[int] = Field(default=None)
 
 
 class Lnclite:
@@ -43,6 +67,9 @@ class Lnclite:
             encoding=tiktoken.encoding_for_model("text-embedding-3-small"),
         )
         self.model_settings = model_settings or ModelSettings(dimensions=1536)
+
+        self.document_model = get_document_model(self.model_settings.dimensions)
+        self.manifest_model = ManifestModel
 
     async def connect(self):
         if self.db is None:
