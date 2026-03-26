@@ -5,6 +5,7 @@ dependencies = [
   "openai",
   "openai-embeddings-model",
   "pydantic (>=2)",
+  "xxhash",
 ]
 description = "Lite usages of lancedb."
 license = { text = "MIT" }
