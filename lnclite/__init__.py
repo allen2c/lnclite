@@ -1,3 +1,4 @@
+import functools
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Final, List, Optional, Text, Type
@@ -123,6 +124,10 @@ class Lnclite:
             logger.info(f"Lancedb connected to {self.lancedb_path}")
         return self.connection
 
+    @functools.cache
+    async def get_table(self, table_name: Text) -> lancedb.AsyncTable:
+        return (await self.get_connection()).open_table(table_name)
+
     async def search(self):
         pass
 
@@ -130,9 +135,29 @@ class Lnclite:
         pass
 
     async def is_synced(self) -> bool:
+        from lnclite.utils.get_folder_fingerprint import get_folder_fingerprint
+
+        manifest: ManifestModel | None = None
+
+        current_fingerprint = get_folder_fingerprint(self.files_dir)
+
+        manifest_table = await self.get_table(self.manifest_table)
+
         if self.last_fingerprint is None:
-            from lnclite.utils.get_folder_fingerprint import get_folder_fingerprint
+            _query_builder = await manifest_table.search()
+            manifests = await _query_builder.limit(1).to_pydantic(self.manifest_model)
+            if len(manifests) > 0:
+                manifest = manifests[0]
 
-            self.last_fingerprint = get_folder_fingerprint(self.files_dir)
+        if manifest is None:
+            logger.debug(f"No manifest found for {self.files_dir}.")
+            return False
 
-        return self.last_fingerprint == get_folder_fingerprint(self.files_dir)
+        elif manifest.last_fingerprint != current_fingerprint:
+            logger.debug(
+                f"Manifest found for {self.files_dir} but fingerprint mismatch. "
+                + f"Expected {manifest.last_fingerprint} but got {current_fingerprint}."
+            )
+            return False
+
+        return True
