@@ -38,9 +38,52 @@ class ManifestModel(LanceModel):
 
 
 class Lnclite:
+    DEFAULT_MANIFEST_TABLE = "manifest"
+    DEFAULT_DOCUMENT_TABLE = "documents"
+
+    @classmethod
+    async def new(
+        cls,
+        files_dir: Path | str = ".",
+        *,
+        lancedb_path: Path | str | None = None,
+        manifest_table: Optional[Text] = None,
+        document_table: Optional[Text] = None,
+        openai_model: Optional["AsyncOpenAIEmbeddingsModel"] = None,
+        model_settings: Optional["ModelSettings"] = None,
+    ) -> "Lnclite":
+        lnclite = cls(
+            files_dir=files_dir,
+            lancedb_path=lancedb_path,
+            manifest_table=manifest_table,
+            document_table=document_table,
+            openai_model=openai_model,
+            model_settings=model_settings,
+        )
+
+        db = await lnclite.get_connection()
+        existing_tables = await db.table_names()
+
+        for table in [lnclite.manifest_table, lnclite.document_table]:
+            if table in existing_tables:
+                raise ValueError(f"Table {table} already exists")
+
+        document_table = db.create_table(
+            lnclite.document_table, schema=lnclite.document_model, mode="overwrite"
+        )
+        manifest_table = db.create_table(
+            lnclite.manifest_table, schema=lnclite.manifest_model, mode="overwrite"
+        )
+
+        return lnclite
+
     def __init__(
         self,
         files_dir: Path | str = ".",
+        *,
+        lancedb_path: Path | str | None = None,
+        manifest_table: Optional[Text] = None,
+        document_table: Optional[Text] = None,
         openai_model: Optional["AsyncOpenAIEmbeddingsModel"] = None,
         model_settings: Optional["ModelSettings"] = None,
     ):
@@ -53,10 +96,13 @@ class Lnclite:
         if not self.files_dir.is_dir():
             raise FileNotFoundError(f"Files directory {self.files_dir} not found")
 
-        self.lancedb_path = self.files_dir.parent.joinpath(
+        self.lancedb_path = lancedb_path or self.files_dir.parent.joinpath(
             "." + self.files_dir.name + ".index"
         )
-        self.db: lancedb.AsyncConnection | None = None
+        self.connection: lancedb.AsyncConnection | None = None
+
+        self.manifest_table = manifest_table or self.DEFAULT_MANIFEST_TABLE
+        self.document_table = document_table or self.DEFAULT_DOCUMENT_TABLE
 
         self.last_fingerprint = None
 
@@ -71,11 +117,11 @@ class Lnclite:
         self.document_model = get_document_model(self.model_settings.dimensions)
         self.manifest_model = ManifestModel
 
-    async def connect(self):
-        if self.db is None:
-            self.db = await lancedb.connect_async(self.lancedb_path)
+    async def get_connection(self) -> lancedb.AsyncConnection:
+        if self.connection is None:
+            self.connection = await lancedb.connect_async(self.lancedb_path)
             logger.info(f"Lancedb connected to {self.lancedb_path}")
-        return self.db
+        return self.connection
 
     async def search(self):
         pass
