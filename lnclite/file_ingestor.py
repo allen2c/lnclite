@@ -13,6 +13,7 @@ from typing import (
     Dict,
     Generator,
     TypeAlias,
+    TypedDict,
     cast,
 )
 
@@ -21,6 +22,11 @@ logger: logging.Logger = logging.getLogger(__name__)
 DEFAULT_BINARY_PROBE_CHUNK_SIZE: int = 1024
 
 FileReader: TypeAlias = Callable[[Path], str] | Callable[[Path], Awaitable[str]]
+
+
+class FileIngestorResult(TypedDict):
+    path: str
+    content: str
 
 
 class FileIngestor:
@@ -37,7 +43,7 @@ class FileIngestor:
         """Registers a handler for a specific file extension (e.g., '.pdf')."""
         self._custom_readers[extension.lower()] = reader_func
 
-    def ingest(self, dir_path: str) -> Generator[Dict[str, str], None, None]:
+    def ingest(self, dir_path: str) -> Generator[FileIngestorResult, None, None]:
         """
         Iterates through the directory and yields documents as they are processed.
         Yields:
@@ -64,17 +70,19 @@ class FileIngestor:
                         continue
                     sync_reader = cast(Callable[[Path], str], reader)
                     content = sync_reader(file_path)
-                    yield {"path": str(file_path), "content": content}
+                    yield FileIngestorResult(path=str(file_path), content=content)
 
                 # 2. Fallback to binary probe for generic text files
                 elif not self._is_binary(file_path):
                     content = self._read_text(file_path)
-                    yield {"path": str(file_path), "content": content}
+                    yield FileIngestorResult(path=str(file_path), content=content)
 
             except Exception as e:
                 logger.warning("Skipping %s due to error: %s", file_path, e)
 
-    async def ingest_async(self, dir_path: str) -> AsyncGenerator[Dict[str, str], None]:
+    async def ingest_async(
+        self, dir_path: str
+    ) -> AsyncGenerator[FileIngestorResult, None]:
         """Async variant of ingest: walks the tree sync, reads via aiofiles."""
         root = Path(dir_path)
 
@@ -92,10 +100,10 @@ class FileIngestor:
                         content = await reader(file_path)
                     else:
                         content = reader(file_path)
-                    yield {"path": str(file_path), "content": content}
+                    yield FileIngestorResult(path=str(file_path), content=content)
                 elif not await asyncio.to_thread(self._is_binary, file_path):
                     content = await asyncio.to_thread(self._read_text, file_path)
-                    yield {"path": str(file_path), "content": content}
+                    yield FileIngestorResult(path=str(file_path), content=content)
             except Exception as e:
                 logger.warning("Skipping %s due to error: %s", file_path, e)
 

@@ -3,7 +3,16 @@ import hashlib
 import logging
 import time
 from pathlib import Path
-from typing import Dict, Final, List, Text, Type
+from typing import (
+    TYPE_CHECKING,
+    Dict,
+    Final,
+    Generic,
+    List,
+    Optional,
+    Text,
+    Type,
+)
 
 import diskcache
 import lancedb
@@ -14,7 +23,10 @@ from openai_embeddings_model import (
     AsyncOpenAIEmbeddingsModel,
     ModelSettings,
 )
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, model_validator
+
+if TYPE_CHECKING:
+    from lnclite.file_ingestor import FileReader
 
 __version__: Final[Text] = "0.1.0"
 
@@ -23,6 +35,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MANIFEST_TABLE = "manifest"
 DEFAULT_DOCUMENT_TABLE = "documents"
 DEFAULT_OPENAI_MODEL = "text-embedding-3-small"
+DEFAULT_MAX_TOKENS = 4096
 
 
 def gen_id() -> str:
@@ -31,8 +44,8 @@ def gen_id() -> str:
     return generate_id()
 
 
-def get_document_model(dim: int) -> Type[LanceModel]:
-    class Document(LanceModel):
+def get_document_lancedb_model(dim: int) -> Type[LanceModel]:
+    class DocumentLancedbModel(LanceModel):
         id: Text = Field(default_factory=gen_id)
         content: Text = Field(description="The content of the document.")  # noqa: E501
         md5: Text = ""
@@ -41,14 +54,14 @@ def get_document_model(dim: int) -> Type[LanceModel]:
         metadata: Dict[Text, Text] = Field(default_factory=dict)
 
         @model_validator(mode="after")
-        def validate_values(self) -> "Document":
+        def validate_values(self) -> "DocumentLancedbModel":
             self.content = self.content.strip()
             if not self.content:
                 raise ValueError("Content cannot be empty")
             self.md5 = hashlib.md5(self.content.encode()).hexdigest()
             return self
 
-    return Document
+    return DocumentLancedbModel
 
 
 def get_default_openai_client() -> AsyncOpenAI:
@@ -80,13 +93,44 @@ def get_default_model_settings() -> "ModelSettings":
     return ModelSettings(dimensions=get_default_dimensions())
 
 
-class ManifestModel(LanceModel):
+class ManifestLancedbModel(LanceModel):
     id: Text = Field(default_factory=gen_id)
     name: Text = Field(description="The name of the database.")
     description: Text = Field(description="The description of the database.")
     model: Text = Field(description="The embedding model name.")
     dimensions: int = Field(description="The dimensions of the embeddings.")
     last_updated: int = Field(default_factory=lambda: int(time.time()))
+
+
+class ManifestModel(LanceModel):
+    id: Text
+    name: Text
+    description: Text
+    model: Text
+    dimensions: int
+    last_updated: int
+
+
+class DocumentCreate(BaseModel):
+    content: Text
+    tags: List[Text] = Field(default_factory=list)
+    metadata: Dict[Text, Text] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_values(self) -> "DocumentCreate":
+        self.content = self.content.strip()
+        if not self.content:
+            raise ValueError("Content cannot be empty")
+        return self
+
+
+class Document(BaseModel):
+    id: Text
+    content: Text
+    md5: Text
+    vector: Optional[str]
+    tags: List[Text]
+    metadata: Dict[Text, Text]
 
 
 class Lnclite:
@@ -98,6 +142,7 @@ class Lnclite:
         document_table: Text = DEFAULT_DOCUMENT_TABLE,
         openai_embeddings_model: "AsyncOpenAIEmbeddingsModel",
         model_settings: "ModelSettings",
+        max_tokens: int = DEFAULT_MAX_TOKENS,
     ):
         self.lancedb_path = Path(lancedb_path)
         self._connection: lancedb.AsyncConnection | None = None
@@ -107,9 +152,12 @@ class Lnclite:
 
         self.openai_embeddings_model = openai_embeddings_model
         self.model_settings = model_settings
+        self.max_tokens = max_tokens
 
-        self.document_model = get_document_model(self.model_settings.dimensions)
-        self.manifest_model = ManifestModel
+        self._document_lancedb_model: Type[LanceModel] = get_document_lancedb_model(
+            self.model_settings.dimensions
+        )
+        self._manifest_lancedb_model = ManifestLancedbModel
 
     @classmethod
     async def build_from_dir(
@@ -123,7 +171,11 @@ class Lnclite:
         document_table: Text = DEFAULT_DOCUMENT_TABLE,
         openai_embeddings_model: "AsyncOpenAIEmbeddingsModel",
         model_settings: "ModelSettings",
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        extension_readers: Optional[Dict[str, "FileReader"]] = None,
     ) -> "Lnclite":
+        from lnclite.file_ingestor import FileIngestor
+
         dir_path = Path(dir_path)
         if not dir_path.is_dir():
             raise FileNotFoundError(f"Directory {dir_path} not found")
@@ -138,13 +190,28 @@ class Lnclite:
             document_table=document_table,
             openai_embeddings_model=openai_embeddings_model,
             model_settings=model_settings,
+            max_tokens=max_tokens,
         )
-        await lnclite.upsert(
+        await lnclite.manifest.upsert(
             name=dataset_name,
             description=dataset_description,
             model=openai_embeddings_model.model,
             dimensions=model_settings.dimensions,
         )
+
+        file_ingestor = FileIngestor()
+        if extension_readers is not None:
+            for extension, reader in extension_readers.items():
+                file_ingestor.register_reader(extension, reader)
+
+        async for file in file_ingestor.ingest_async(dir_path):
+            await lnclite.documents.add(
+                content=file["content"],
+                metadata={
+                    "path": file["path"],
+                },
+            )
+
         return lnclite
 
     async def get_connection(self) -> lancedb.AsyncConnection:
@@ -162,7 +229,7 @@ class Lnclite:
         return Documents(self)
 
 
-class Manifest:
+class Manifest(Generic):
     def __init__(self, client: "Lnclite"):
         self.client = client
 
@@ -177,7 +244,7 @@ class Manifest:
         _query_builder = await manifest_table.search()
         manifests = await _query_builder.limit(1).to_pydantic(self.manifest_model)
         if len(manifests) > 0:
-            return manifests[0]
+            return ManifestModel.model_validate_json(manifests[0].model_dump_json())
         return None
 
     async def retrieve(self) -> ManifestModel:
@@ -193,12 +260,12 @@ class Manifest:
         description: Text,
         model: Text,
         dimensions: int,
-    ):
+    ) -> ManifestModel:
         table = await self.get_table()
         might_manifest = await self.get()
 
         if might_manifest is None:
-            manifest = ManifestModel(
+            manifest = self.client._manifest_lancedb_model(
                 name=name, description=description, model=model, dimensions=dimensions
             )
             await table.add([manifest])
@@ -212,10 +279,10 @@ class Manifest:
             manifest.last_updated = int(time.time())
             await table.update(where=f"id = {manifest.id}", values=manifest)
 
-        return manifest
+        return ManifestModel.model_validate_json(manifest.model_dump_json())
 
 
-class Documents:
+class Documents(Generic):
     def __init__(self, client: "Lnclite"):
         self.client = client
 
@@ -228,6 +295,16 @@ class Documents:
     async def count(self) -> int:
         document_table = await self.get_table()
         return await document_table.count_rows()
+
+    async def create(self, document_create: DocumentCreate) -> Document:
+        document_table = await self.get_table()
+        document = self.client._document_lancedb_model(
+            content=document_create.content,
+            tags=document_create.tags,
+            metadata=document_create.metadata,
+        )
+        await document_table.add([document])
+        return Document.model_validate_json(document.model_dump_json())
 
 
 class LncliteNotFoundError(Exception):
