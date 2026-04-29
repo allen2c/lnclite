@@ -1,8 +1,9 @@
 import functools
 import hashlib
 import logging
+import time
 from pathlib import Path
-from typing import Dict, Final, List, Optional, Text, Type
+from typing import Dict, Final, List, Text, Type
 
 import diskcache
 import lancedb
@@ -81,9 +82,11 @@ def get_default_model_settings() -> "ModelSettings":
 
 class ManifestModel(LanceModel):
     id: Text = Field(default_factory=gen_id)
-    model: Text = Field(description="The model used to generate the manifest.")
+    name: Text = Field(description="The name of the database.")
+    description: Text = Field(description="The description of the database.")
+    model: Text = Field(description="The embedding model name.")
     dimensions: int = Field(description="The dimensions of the embeddings.")
-    last_updated: Optional[int] = Field(default=None)
+    last_updated: int = Field(default_factory=lambda: int(time.time()))
 
 
 class Lnclite:
@@ -109,11 +112,13 @@ class Lnclite:
         self.manifest_model = ManifestModel
 
     @classmethod
-    def build_from_dir(
+    async def build_from_dir(
         cls,
         dir_path: Path | str,
         lancedb_path: Path | str,
         *,
+        dataset_name: Text,
+        dataset_description: Text,
         manifest_table: Text = DEFAULT_MANIFEST_TABLE,
         document_table: Text = DEFAULT_DOCUMENT_TABLE,
         openai_embeddings_model: "AsyncOpenAIEmbeddingsModel",
@@ -127,13 +132,20 @@ class Lnclite:
         if lancedb_path.is_dir():
             raise ValueError(f"Lancedb path {lancedb_path} already exists ")
 
-        return cls(
+        lnclite = cls(
             lancedb_path=lancedb_path,
             manifest_table=manifest_table,
             document_table=document_table,
             openai_embeddings_model=openai_embeddings_model,
             model_settings=model_settings,
         )
+        await lnclite.upsert(
+            name=dataset_name,
+            description=dataset_description,
+            model=openai_embeddings_model.model,
+            dimensions=model_settings.dimensions,
+        )
+        return lnclite
 
     async def get_connection(self) -> lancedb.AsyncConnection:
         if self._connection is None:
@@ -155,11 +167,13 @@ class Manifest:
         self.client = client
 
     @functools.cache
-    async def get_table(self, table_name: Text) -> lancedb.AsyncTable:
-        return (await self.get_connection()).open_table(table_name)
+    async def get_table(self) -> lancedb.AsyncTable:
+        return (await self.client.get_connection()).open_table(
+            self.client.manifest_table
+        )
 
     async def get(self) -> ManifestModel | None:
-        manifest_table = await self.get_table(self.manifest_table)
+        manifest_table = await self.get_table()
         _query_builder = await manifest_table.search()
         manifests = await _query_builder.limit(1).to_pydantic(self.manifest_model)
         if len(manifests) > 0:
@@ -172,17 +186,47 @@ class Manifest:
             return might_manifest
         raise LncliteNotFoundError("Manifest not found")
 
+    async def upsert(
+        self,
+        *,
+        name: Text,
+        description: Text,
+        model: Text,
+        dimensions: int,
+    ):
+        table = await self.get_table()
+        might_manifest = await self.get()
+
+        if might_manifest is None:
+            manifest = ManifestModel(
+                name=name, description=description, model=model, dimensions=dimensions
+            )
+            await table.add([manifest])
+
+        else:
+            manifest = might_manifest
+            manifest.name = name
+            manifest.description = description
+            manifest.model = model
+            manifest.dimensions = dimensions
+            manifest.last_updated = int(time.time())
+            await table.update(where=f"id = {manifest.id}", values=manifest)
+
+        return manifest
+
 
 class Documents:
     def __init__(self, client: "Lnclite"):
         self.client = client
 
     @functools.cache
-    async def get_table(self, table_name: Text) -> lancedb.AsyncTable:
-        return (await self.get_connection()).open_table(table_name)
+    async def get_table(self) -> lancedb.AsyncTable:
+        return (await self.client.get_connection()).open_table(
+            self.client.document_table
+        )
 
     async def count(self) -> int:
-        document_table = await self.get_table(self.document_table)
+        document_table = await self.get_table()
         return await document_table.count_rows()
 
 
