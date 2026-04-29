@@ -12,7 +12,6 @@ from openai import AsyncOpenAI
 from openai_embeddings_model import (
     AsyncOpenAIEmbeddingsModel,
     ModelSettings,
-    encoding_for_model,
 )
 from pydantic import Field, model_validator
 
@@ -90,22 +89,14 @@ class ManifestModel(LanceModel):
 class Lnclite:
     def __init__(
         self,
-        files_dir: Path | str,
-        *,
         lancedb_path: Path | str | None = None,
+        *,
         manifest_table: Text = DEFAULT_MANIFEST_TABLE,
         document_table: Text = DEFAULT_DOCUMENT_TABLE,
         openai_embeddings_model: "AsyncOpenAIEmbeddingsModel",
         model_settings: "ModelSettings",
     ):
-
-        self.files_dir = Path(files_dir)
-        if not self.files_dir.is_dir():
-            raise FileNotFoundError(f"Files directory {self.files_dir} not found")
-
-        self.lancedb_path = lancedb_path or self.files_dir.parent.joinpath(
-            "." + self.files_dir.name + ".index"
-        )
+        self.lancedb_path = Path(lancedb_path)
         self._connection: lancedb.AsyncConnection | None = None
 
         self.manifest_table = manifest_table
@@ -117,7 +108,32 @@ class Lnclite:
         self.document_model = get_document_model(self.model_settings.dimensions)
         self.manifest_model = ManifestModel
 
-    # def build()
+    @classmethod
+    def build_from_dir(
+        cls,
+        dir_path: Path | str,
+        lancedb_path: Path | str,
+        *,
+        manifest_table: Text = DEFAULT_MANIFEST_TABLE,
+        document_table: Text = DEFAULT_DOCUMENT_TABLE,
+        openai_embeddings_model: "AsyncOpenAIEmbeddingsModel",
+        model_settings: "ModelSettings",
+    ) -> "Lnclite":
+        dir_path = Path(dir_path)
+        if not dir_path.is_dir():
+            raise FileNotFoundError(f"Directory {dir_path} not found")
+
+        lancedb_path = Path(lancedb_path)
+        if lancedb_path.is_dir():
+            raise ValueError(f"Lancedb path {lancedb_path} already exists ")
+
+        return cls(
+            lancedb_path=lancedb_path,
+            manifest_table=manifest_table,
+            document_table=document_table,
+            openai_embeddings_model=openai_embeddings_model,
+            model_settings=model_settings,
+        )
 
     async def get_connection(self) -> lancedb.AsyncConnection:
         if self._connection is None:
