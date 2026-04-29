@@ -298,13 +298,56 @@ class Documents(Generic):
 
     async def create(self, document_create: DocumentCreate) -> Document:
         document_table = await self.get_table()
+
+        emb_res = await self.client.openai_embeddings_model.get_embeddings(
+            document_create.content, model_settings=self.client.model_settings
+        )
+
         document = self.client._document_lancedb_model(
             content=document_create.content,
             tags=document_create.tags,
             metadata=document_create.metadata,
+            vector=emb_res.to_python()[0],
         )
+
         await document_table.add([document])
-        return Document.model_validate_json(document.model_dump_json())
+
+        output = Document.model_validate_json(
+            document.model_dump_json(exclude_none=True)
+        )
+        output.vector = emb_res.output[0]  # In base64 format
+
+        return output
+
+    async def batch_create(
+        self, document_creates: List[DocumentCreate]
+    ) -> List[Document]:
+        document_table = await self.get_table()
+
+        emb_res = await self.client.openai_embeddings_model.get_embeddings(
+            [d.content for d in document_creates],
+            model_settings=self.client.model_settings,
+        )
+
+        documents = [
+            self.client._document_lancedb_model(
+                content=d.content, tags=d.tags, metadata=d.metadata, vector=v
+            )
+            for d, v in zip(document_creates, emb_res.to_python())
+        ]
+
+        await document_table.add(documents)
+
+        output: List[Document] = []
+        for document in documents:
+            output.append(
+                Document.model_validate_json(
+                    document.model_dump_json(exclude_none=True)
+                )
+            )
+            output.vector = emb_res.output[0]  # In base64 format
+
+        return output
 
 
 class LncliteNotFoundError(Exception):
