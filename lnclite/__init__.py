@@ -191,7 +191,9 @@ class Lnclite:
 
         lancedb_path = Path(lancedb_path)
         if lancedb_path.is_dir():
-            raise ValueError(f"Lancedb path {lancedb_path} already exists ")
+            # If not a empty directory, raise an error
+            for _ in lancedb_path.iterdir():
+                raise ValueError(f"Lancedb path {lancedb_path} already exists ")
 
         lnclite = cls(
             lancedb_path=lancedb_path,
@@ -254,16 +256,20 @@ class Lnclite:
 class Manifest:
     def __init__(self, client: "Lnclite"):
         self.client = client
+        self._table: lancedb.AsyncTable | None = None
 
-    @functools.cache
     async def get_table(self) -> lancedb.AsyncTable:
+        if self._table is not None:
+            return self._table
+
         conn = await self.client.get_connection()
         if self.client.manifest_table in (await conn.table_names()):
-            return await conn.open_table(self.client.manifest_table)
+            self._table = await conn.open_table(self.client.manifest_table)
         else:
-            return await conn.create_table(
+            self._table = await conn.create_table(
                 self.client.manifest_table, schema=self.client._manifest_lancedb_model
             )
+        return self._table
 
     async def get(self) -> ManifestModel | None:
         manifest_table = await self.get_table()
@@ -313,16 +319,20 @@ class Manifest:
 class Documents:
     def __init__(self, client: "Lnclite"):
         self.client = client
+        self._table: lancedb.AsyncTable | None = None
 
-    @functools.cache
     async def get_table(self) -> lancedb.AsyncTable:
+        if self._table is not None:
+            return self._table
+
         conn = await self.client.get_connection()
         if self.client.document_table in (await conn.table_names()):
-            return await conn.open_table(self.client.document_table)
+            self._table = await conn.open_table(self.client.document_table)
         else:
-            return await conn.create_table(
+            self._table = await conn.create_table(
                 self.client.document_table, schema=self.client._document_lancedb_model
             )
+        return self._table
 
     async def count(self) -> int:
         document_table = await self.get_table()
