@@ -7,7 +7,6 @@ from typing import (
     TYPE_CHECKING,
     Dict,
     Final,
-    Generic,
     List,
     Optional,
     Text,
@@ -44,6 +43,7 @@ def gen_id() -> str:
     return generate_id()
 
 
+@functools.cache
 def get_document_lancedb_model(dim: int) -> Type[LanceModel]:
     class DocumentLancedbModel(LanceModel):
         id: Text = Field(default_factory=gen_id)
@@ -64,31 +64,39 @@ def get_document_lancedb_model(dim: int) -> Type[LanceModel]:
     return DocumentLancedbModel
 
 
+@functools.cache
 def get_default_openai_client() -> AsyncOpenAI:
     return AsyncOpenAI()
 
 
+@functools.cache
 def get_default_openai_embeddings_model_name() -> str:
     return DEFAULT_OPENAI_MODEL
 
 
+@functools.cache
 def get_default_dimensions() -> int:
     return 1536
 
 
+@functools.cache
 def get_default_embeddings_cache() -> diskcache.Cache:
     return diskcache.Cache(".cache/embeddings")
 
 
+@functools.cache
 def get_default_openai_embeddings_model() -> "AsyncOpenAIEmbeddingsModel":
     return AsyncOpenAIEmbeddingsModel(
-        model=get_default_openai_embeddings_model(),
+        model=get_default_openai_embeddings_model_name(),
         openai_client=get_default_openai_client(),
         cache=get_default_embeddings_cache(),
-        encoding=tiktoken.encoding_for_model(get_default_openai_embeddings_model()),
+        encoding=tiktoken.encoding_for_model(
+            get_default_openai_embeddings_model_name()
+        ),
     )
 
 
+@functools.cache
 def get_default_model_settings() -> "ModelSettings":
     return ModelSettings(dimensions=get_default_dimensions())
 
@@ -173,6 +181,7 @@ class Lnclite:
         model_settings: "ModelSettings",
         max_tokens: int = DEFAULT_MAX_TOKENS,
         extension_readers: Optional[Dict[str, "FileReader"]] = None,
+        batch_size: int = 100,
     ) -> "Lnclite":
         from lnclite.file_ingestor import FileIngestor
 
@@ -204,13 +213,26 @@ class Lnclite:
             for extension, reader in extension_readers.items():
                 file_ingestor.register_reader(extension, reader)
 
+        batch: List[DocumentCreate] = []
         async for file in file_ingestor.ingest_async(dir_path):
-            await lnclite.documents.add(
-                content=file["content"],
-                metadata={
-                    "path": file["path"],
-                },
+            _file_content = file["content"].strip()
+            _file_path = str(file["path"])
+
+            if not _file_content:
+                logger.warning(f"Skipping {_file_path} due to empty content")
+                continue
+
+            batch.append(
+                DocumentCreate(content=_file_content, metadata={"path": _file_path})
             )
+
+            if len(batch) >= batch_size:
+                await lnclite.documents.batch_create(batch)
+                logger.info(f"Created {len(batch)} documents")
+                batch = []
+
+        if batch:
+            await lnclite.documents.batch_create(batch)
 
         return lnclite
 
@@ -229,20 +251,26 @@ class Lnclite:
         return Documents(self)
 
 
-class Manifest(Generic):
+class Manifest:
     def __init__(self, client: "Lnclite"):
         self.client = client
 
     @functools.cache
     async def get_table(self) -> lancedb.AsyncTable:
-        return (await self.client.get_connection()).open_table(
-            self.client.manifest_table
-        )
+        conn = await self.client.get_connection()
+        if self.client.manifest_table in (await conn.table_names()):
+            return await conn.open_table(self.client.manifest_table)
+        else:
+            return await conn.create_table(
+                self.client.manifest_table, schema=self.client._manifest_lancedb_model
+            )
 
     async def get(self) -> ManifestModel | None:
         manifest_table = await self.get_table()
         _query_builder = await manifest_table.search()
-        manifests = await _query_builder.limit(1).to_pydantic(self.manifest_model)
+        manifests = await _query_builder.limit(1).to_pydantic(
+            self.client._manifest_lancedb_model
+        )
         if len(manifests) > 0:
             return ManifestModel.model_validate_json(manifests[0].model_dump_json())
         return None
@@ -282,15 +310,19 @@ class Manifest(Generic):
         return ManifestModel.model_validate_json(manifest.model_dump_json())
 
 
-class Documents(Generic):
+class Documents:
     def __init__(self, client: "Lnclite"):
         self.client = client
 
     @functools.cache
     async def get_table(self) -> lancedb.AsyncTable:
-        return (await self.client.get_connection()).open_table(
-            self.client.document_table
-        )
+        conn = await self.client.get_connection()
+        if self.client.document_table in (await conn.table_names()):
+            return await conn.open_table(self.client.document_table)
+        else:
+            return await conn.create_table(
+                self.client.document_table, schema=self.client._document_lancedb_model
+            )
 
     async def count(self) -> int:
         document_table = await self.get_table()

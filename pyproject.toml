@@ -30,6 +30,7 @@ all = []
 black = { extras = ["jupyter"], version = "*" }
 isort = "*"
 lines-of-work = { git = "https://github.com/allen2c/lines-of-work.git" }
+logging-bullet-train = ">=0.4.0"
 mkdocs-material = "*"
 poetry-plugin-export = "*"
 pytest = "*"
