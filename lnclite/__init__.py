@@ -46,12 +46,11 @@ def gen_id() -> str:
 @functools.cache
 def get_document_lancedb_model(dim: int) -> Type[LanceModel]:
     class DocumentLancedbModel(LanceModel):
-        id: Text = Field(default_factory=gen_id)
+        id: int = Field(default_factory=gen_id)
         content: Text = Field(description="The content of the document.")  # noqa: E501
         md5: Text = ""
         vector: Vector(dim)
         tags: List[Text] = Field(default_factory=list)
-        metadata: Dict[Text, Text] = Field(default_factory=dict)
 
         @model_validator(mode="after")
         def validate_values(self) -> "DocumentLancedbModel":
@@ -102,7 +101,7 @@ def get_default_model_settings() -> "ModelSettings":
 
 
 class ManifestLancedbModel(LanceModel):
-    id: Text = Field(default_factory=gen_id)
+    id: int = Field(default_factory=gen_id)
     name: Text = Field(description="The name of the database.")
     description: Text = Field(description="The description of the database.")
     model: Text = Field(description="The embedding model name.")
@@ -111,7 +110,7 @@ class ManifestLancedbModel(LanceModel):
 
 
 class ManifestModel(LanceModel):
-    id: Text
+    id: int
     name: Text
     description: Text
     model: Text
@@ -122,7 +121,6 @@ class ManifestModel(LanceModel):
 class DocumentCreate(BaseModel):
     content: Text
     tags: List[Text] = Field(default_factory=list)
-    metadata: Dict[Text, Text] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_values(self) -> "DocumentCreate":
@@ -133,12 +131,11 @@ class DocumentCreate(BaseModel):
 
 
 class Document(BaseModel):
-    id: Text
+    id: int
     content: Text
     md5: Text
-    vector: Optional[str]
+    vector: Optional[List[float]]
     tags: List[Text]
-    metadata: Dict[Text, Text]
 
 
 class Lnclite:
@@ -273,7 +270,7 @@ class Manifest:
 
     async def get(self) -> ManifestModel | None:
         manifest_table = await self.get_table()
-        _query_builder = await manifest_table.search()
+        _query_builder = manifest_table.query()
         manifests = await _query_builder.limit(1).to_pydantic(
             self.client._manifest_lancedb_model
         )
@@ -373,7 +370,7 @@ class Documents:
 
         documents = [
             self.client._document_lancedb_model(
-                content=d.content, tags=d.tags, metadata=d.metadata, vector=v
+                content=d.content, tags=d.tags, vector=v
             )
             for d, v in zip(document_creates, emb_res.to_python())
         ]
@@ -381,13 +378,12 @@ class Documents:
         await document_table.add(documents)
 
         output: List[Document] = []
-        for document in documents:
-            output.append(
-                Document.model_validate_json(
-                    document.model_dump_json(exclude_none=True)
-                )
+        for document, v in zip(documents, emb_res.to_python()):
+            _doc = Document.model_validate_json(
+                document.model_dump_json(exclude_none=True)
             )
-            output.vector = emb_res.output[0]  # In base64 format
+            _doc.vector = v
+            output.append(_doc)
 
         return output
 
