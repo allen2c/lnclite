@@ -15,6 +15,7 @@ from typing import (
 
 import diskcache
 import lancedb
+import numpy as np
 import tiktoken
 from lancedb.pydantic import LanceModel, Vector
 from openai import AsyncOpenAI
@@ -251,13 +252,16 @@ class Lnclite:
     def documents(self) -> "Documents":
         return Documents(self)
 
+    async def embed(self, texts: List[Text]) -> np.ndarray:
+        emb_res = await self.openai_embeddings_model.get_embeddings(
+            texts, model_settings=self.model_settings
+        )
+        return normalize(emb_res.to_numpy())  # (n, d)
+
     async def search(self, query: Text, *, limit: int = 5) -> "SearchResults":
         document_table = await self.documents.get_table()
 
-        emb_res = await self.openai_embeddings_model.get_embeddings(
-            [query], model_settings=self.model_settings
-        )
-        query_vector = normalize(emb_res.to_numpy())[0]
+        query_vector = (await self.embed([query]))[0]
 
         search_query = await document_table.search(query_vector)
         search_results: List[Dict] = (
@@ -366,11 +370,9 @@ class Documents:
     ) -> List[Document]:
         document_table = await self.get_table()
 
-        emb_res = await self.client.openai_embeddings_model.get_embeddings(
-            [d.content for d in document_creates],
-            model_settings=self.client.model_settings,
+        normalized_vectors = await self.client.embed(
+            [d.content for d in document_creates]
         )
-        normalized_vectors = normalize(emb_res.to_numpy())  # (n, d)
 
         documents = [
             self.client._document_lancedb_model(
