@@ -1,3 +1,5 @@
+"""Small async LanceDB document store with OpenAI embeddings."""
+
 import functools
 import hashlib
 import logging
@@ -41,6 +43,10 @@ DEFAULT_MANIFEST_TABLE = "manifest"
 DEFAULT_DOCUMENT_TABLE = "documents"
 DEFAULT_OPENAI_MODEL = "text-embedding-3-small"
 DEFAULT_MAX_TOKENS = 4096
+
+VectorIndexPreference = Literal["storage", "balanced", "accuracy", "latency"]
+ListOrder = Literal["asc", "desc", 1, -1]
+SqlOrder = Literal["ASC", "DESC"]
 
 
 def gen_id() -> str:
@@ -124,15 +130,9 @@ def recommended_vector_index_config(
     row_count: int,
     dim: int,
     *,
-    prefer: Literal["storage", "balanced", "accuracy", "latency"] = "balanced",
+    prefer: VectorIndexPreference = "balanced",
 ):
-    """
-    Return a LanceDB vector index config for dot-search.
-
-    Assumes vectors are normalized before insert/search.
-    """
-    """
-    Return LanceDB vector index config for dot-search.
+    """Return a LanceDB vector index config for dot-search.
 
     Assumes document vectors and query vectors are normalized.
     Returns None when brute-force is better or when there are not enough rows.
@@ -207,10 +207,9 @@ def recommended_vector_index_config(
 
 
 def recommended_num_sub_vectors(
-    dim: int, prefer: Literal["storage", "balanced", "accuracy", "latency"] = "balanced"
+    dim: int, prefer: VectorIndexPreference = "balanced"
 ) -> int:
-    """
-    PQ subvector count.
+    """Return a PQ subvector count.
 
     Higher = more accurate, larger index.
     Lower = more compressed, lower recall.
@@ -277,9 +276,7 @@ class Lnclite:
         model_settings: "ModelSettings",
         max_tokens: int = DEFAULT_MAX_TOKENS,
         token_secret_key: Text = "__lnclite__",
-        vector_search_prefer: Literal[
-            "storage", "balanced", "accuracy", "latency"
-        ] = "balanced",
+        vector_search_prefer: VectorIndexPreference = "balanced",
         verbose: bool = False,
     ):
         self.lancedb_path = Path(lancedb_path)
@@ -398,12 +395,27 @@ class Lnclite:
         )
         return normalize(emb_res.to_numpy())  # (n, d)
 
-    async def search(self, query: Text, *, limit: int = 5) -> "SearchResults":
+    async def search(
+        self,
+        query: Text,
+        *,
+        tags_any: Optional[List[Text]] = None,
+        tags_all: Optional[List[Text]] = None,
+        limit: int = 5,
+        verbose: bool = False,
+    ) -> "SearchResults":
         document_table = await self.documents.get_table()
 
         query_vector = (await self.embed([query]))[0]
 
         search_query = await document_table.search(query_vector)
+        tags_filter = _tags_filter(tags_any=tags_any, tags_all=tags_all)
+        if tags_filter is not None:
+            search_query = search_query.where(tags_filter)
+
+        if verbose or self.verbose:
+            logger.info(f"Query plan: {await search_query.explain_plan()}")
+
         search_results: List[Dict] = (
             await search_query.distance_type("dot").limit(limit).to_list()
         )
@@ -427,7 +439,7 @@ class Manifest:
             return self._table
 
         conn = await self.client.get_connection()
-        if self.client.manifest_table in (await conn.table_names()):
+        if await _table_exists(conn, self.client.manifest_table):
             self._table = await conn.open_table(self.client.manifest_table)
         else:
             self._table = await conn.create_table(
@@ -490,7 +502,7 @@ class Documents:
             return self._table
 
         conn = await self.client.get_connection()
-        if self.client.document_table in (await conn.table_names()):
+        if await _table_exists(conn, self.client.document_table):
             self._table = await conn.open_table(self.client.document_table)
         else:
             self._table = await conn.create_table(
@@ -575,25 +587,21 @@ class Documents:
     async def list(
         self,
         *,
+        tags_any: Optional[List[Text]] = None,
+        tags_all: Optional[List[Text]] = None,
         limit: int = 10,
-        order: Literal["asc", "desc", 1, -1] = "asc",
+        order: ListOrder = "asc",
         next_page_token: Optional[Text] = None,
         verbose: bool = False,
     ) -> TokenPaginatic[Document]:
-        valid_order: Literal["ASC", "DESC"] = (
-            "ASC" if order in ("asc", 1) else "DESC" if order in ("desc", -1) else None
-        )
-        if valid_order is None:
-            raise ValueError(f"Invalid order: {order}")
-        valid_op = ">" if valid_order == "ASC" else "<"
-
         if limit < 1:
             raise ValueError(f"Limit must be greater than 0, got {limit}")
-        valid_limit = int(limit)
 
+        sql_order = _to_sql_order(order)
+        id_operator = ">" if sql_order == "ASC" else "<"
         after_id: Optional[int] = None
         if next_page_token is not None:
-            decoded_token = decode_and_verify(next_page_token, self.client.__secret_key)
+            decoded_token = decode_and_verify(next_page_token, self.client._secret_key)
             after_id = decoded_token.get("after")
 
         document_table = await self.client.documents.get_table()
@@ -602,17 +610,22 @@ class Documents:
         query_builder = document_table.query()
 
         query_builder = query_builder.where(
-            (f"id {valid_op} {after_id}" if after_id is not None else "id > 0")
-            + f" ORDER BY id {valid_order}"
-        ).limit(valid_limit + 1)
+            _documents_list_where_clause(
+                id_operator=id_operator,
+                sql_order=sql_order,
+                after_id=after_id,
+                tags_any=tags_any,
+                tags_all=tags_all,
+            )
+        ).limit(limit + 1)
         if verbose or self.client.verbose:
             logger.info(f"Query plan: {await query_builder.explain_plan()}")
 
         # Execute query
         documents = await query_builder.to_pydantic(self.client._document_lancedb_model)
 
-        has_more = len(documents) > valid_limit
-        documents = documents[:valid_limit]
+        has_more = len(documents) > limit
+        documents = documents[:limit]
 
         _next_token = (
             encode_and_sign({"after": documents[-1].id}, self.client._secret_key)
@@ -638,3 +651,49 @@ class SearchResults(BaseModel):
 
 class LncliteNotFoundError(Exception):
     pass
+
+
+def _documents_list_where_clause(
+    *,
+    id_operator: Literal[">", "<"],
+    sql_order: SqlOrder,
+    after_id: Optional[int] = None,
+    tags_any: Optional[List[Text]] = None,
+    tags_all: Optional[List[Text]] = None,
+) -> str:
+    id_filter = f"id {id_operator} {after_id}" if after_id is not None else "id > 0"
+    filters = [id_filter]
+
+    if tags_filter := _tags_filter(tags_any=tags_any, tags_all=tags_all):
+        filters.append(tags_filter)
+
+    where_clause = " AND ".join(f"({filter_})" for filter_ in filters)
+    return f"{where_clause} ORDER BY id {sql_order}"
+
+
+def _tags_filter(
+    *,
+    tags_any: Optional[List[Text]] = None,
+    tags_all: Optional[List[Text]] = None,
+) -> Optional[str]:
+    filters: List[str] = []
+    if tags_any:
+        filters.append(tag_filter_any(tags_any))
+    if tags_all:
+        filters.append(tag_filter_all(tags_all))
+    if not filters:
+        return None
+    return " AND ".join(f"({filter_})" for filter_ in filters)
+
+
+def _to_sql_order(order: ListOrder) -> SqlOrder:
+    if order in ("asc", 1):
+        return "ASC"
+    if order in ("desc", -1):
+        return "DESC"
+    raise ValueError(f"Invalid order: {order}")
+
+
+async def _table_exists(conn: lancedb.AsyncConnection, table_name: Text) -> bool:
+    table_list = await conn.list_tables()
+    return table_name in table_list.tables
