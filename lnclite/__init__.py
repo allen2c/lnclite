@@ -8,6 +8,7 @@ from typing import (
     Dict,
     Final,
     List,
+    Literal,
     Optional,
     Text,
     Type,
@@ -24,6 +25,8 @@ from openai_embeddings_model import (
     ModelSettings,
 )
 from openai_embeddings_model.normalize import normalize
+from paginatic import TokenPaginatic
+from paginatic.helpers import decode_and_verify, encode_and_sign
 from pydantic import BaseModel, Field, model_validator
 
 if TYPE_CHECKING:
@@ -150,6 +153,7 @@ class Lnclite:
         openai_embeddings_model: "AsyncOpenAIEmbeddingsModel",
         model_settings: "ModelSettings",
         max_tokens: int = DEFAULT_MAX_TOKENS,
+        token_secret_key: Text = "__lnclite__",
     ):
         self.lancedb_path = Path(lancedb_path)
         self._connection: lancedb.AsyncConnection | None = None
@@ -165,6 +169,8 @@ class Lnclite:
             self.model_settings.dimensions
         )
         self._manifest_lancedb_model = ManifestLancedbModel
+
+        self._secret_key = token_secret_key
 
     @classmethod
     async def build_from_dir(
@@ -410,6 +416,59 @@ class Documents:
             output.append(_doc)
 
         return output
+
+    async def list(
+        self,
+        *,
+        limit: int = 10,
+        order: Literal["asc", "desc", 1, -1] = "asc",
+        next_page_token: Optional[Text] = None,
+    ) -> TokenPaginatic[Document]:
+        valid_order: Literal["ASC", "DESC"] = (
+            "ASC" if order in ("asc", 1) else "DESC" if order in ("desc", -1) else None
+        )
+        if valid_order is None:
+            raise ValueError(f"Invalid order: {order}")
+        valid_op = ">" if valid_order == "ASC" else "<"
+
+        if limit < 1:
+            raise ValueError(f"Limit must be greater than 0, got {limit}")
+        valid_limit = int(limit)
+
+        after_id: Optional[int] = None
+        if next_page_token is not None:
+            decoded_token = decode_and_verify(next_page_token, self.client.__secret_key)
+            after_id = decoded_token.get("after")
+
+        document_table = await self.client.documents.get_table()
+
+        query_builder = document_table.query()
+
+        where_clause = (
+            f"id {valid_op} {after_id}" if after_id is not None else "id > 0"
+        ) + f" ORDER BY id {valid_order}"
+        logger.info(f"Query: {where_clause}")
+
+        documents = await (
+            query_builder.where(where_clause)
+            .limit(valid_limit + 1)
+            .to_pydantic(self.client._document_lancedb_model)
+        )
+
+        has_more = len(documents) > valid_limit
+        documents = documents[:valid_limit]
+
+        _next_token = (
+            encode_and_sign({"after": documents[-1].id}, self.client._secret_key)
+            if has_more
+            else None
+        )
+
+        return TokenPaginatic(
+            object="list",
+            data=[Document.model_validate_json(d.model_dump_json()) for d in documents],
+            next_page_token=_next_token,
+        )
 
 
 class SearchResult(BaseModel):
