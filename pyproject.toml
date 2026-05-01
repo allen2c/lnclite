@@ -5,6 +5,7 @@ dependencies = [
   "lancedb",
   "openai",
   "openai-embeddings-model",
+  "paginatic",
   "pydantic (>=2)",
   "xxhash",
 ]
