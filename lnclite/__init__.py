@@ -16,6 +16,7 @@ from typing import (
 
 import diskcache
 import lancedb
+import lancedb.index
 import numpy as np
 import tiktoken
 from lancedb.pydantic import LanceModel, Vector
@@ -105,6 +106,128 @@ def get_default_model_settings() -> "ModelSettings":
     return ModelSettings(dimensions=get_default_dimensions())
 
 
+def quote_sql_string(s: str) -> str:
+    return "'" + s.replace("'", "''") + "'"
+
+
+def tag_filter_any(tags: list[str]) -> str:
+    values = ", ".join(quote_sql_string(tag) for tag in tags)
+    return f"array_has_any(tags, [{values}])"
+
+
+def tag_filter_all(tags: list[str]) -> str:
+    values = ", ".join(quote_sql_string(tag) for tag in tags)
+    return f"array_has_all(tags, [{values}])"
+
+
+def recommended_vector_index_config(
+    row_count: int,
+    dim: int,
+    *,
+    prefer: Literal["storage", "balanced", "accuracy", "latency"] = "balanced",
+):
+    """
+    Return a LanceDB vector index config for dot-search.
+
+    Assumes vectors are normalized before insert/search.
+    """
+    """
+    Return LanceDB vector index config for dot-search.
+
+    Assumes document vectors and query vectors are normalized.
+    Returns None when brute-force is better or when there are not enough rows.
+    """
+
+    # Too small. Brute-force is exact and fast.
+    # Also avoids PQ training errors.
+    if row_count < 256:
+        return None
+
+    # Still small. Brute-force is usually fine.
+    # If you really want an index, IvfFlat is safer than PQ.
+    if row_count < 10_000:
+        if prefer in {"accuracy", "latency"}:
+            return lancedb.index.IvfFlat(
+                distance_type="dot",
+                num_partitions=32,
+            )
+        return None
+
+    if row_count < 50_000:
+        return lancedb.index.IvfFlat(
+            distance_type="dot",
+            num_partitions=128,
+        )
+
+    if row_count < 100_000:
+        if prefer == "storage":
+            return lancedb.index.IvfPq(
+                distance_type="dot",
+                num_partitions=256,
+                num_sub_vectors=recommended_num_sub_vectors(dim, prefer),
+                num_bits=8,
+            )
+
+        return lancedb.index.IvfFlat(
+            distance_type="dot",
+            num_partitions=256,
+        )
+
+    if row_count < 500_000:
+        return lancedb.index.IvfPq(
+            distance_type="dot",
+            num_partitions=1024 if prefer == "storage" else 2048,
+            num_sub_vectors=recommended_num_sub_vectors(dim, prefer),
+            num_bits=8,
+        )
+
+    if row_count < 1_000_000:
+        return lancedb.index.IvfPq(
+            distance_type="dot",
+            num_partitions=2048 if prefer == "storage" else 4096,
+            num_sub_vectors=recommended_num_sub_vectors(dim, prefer),
+            num_bits=8,
+        )
+
+    if prefer == "latency":
+        return lancedb.index.HnswPq(
+            distance_type="dot",
+            m=20,
+            ef_construction=300,
+            num_sub_vectors=recommended_num_sub_vectors(dim, "balanced"),
+            num_bits=8,
+        )
+
+    return lancedb.index.IvfPq(
+        distance_type="dot",
+        num_partitions=4096 if prefer in {"storage", "balanced"} else 8192,
+        num_sub_vectors=recommended_num_sub_vectors(dim, prefer),
+        num_bits=8,
+    )
+
+
+def recommended_num_sub_vectors(
+    dim: int, prefer: Literal["storage", "balanced", "accuracy", "latency"] = "balanced"
+) -> int:
+    """
+    PQ subvector count.
+
+    Higher = more accurate, larger index.
+    Lower = more compressed, lower recall.
+    """
+
+    # Prefer subvector sizes around 8~16 dimensions.
+    if prefer == "storage":
+        target_sub_dim = 16
+    elif prefer == "accuracy":
+        target_sub_dim = 8
+    else:
+        target_sub_dim = 12
+
+    candidates = [x for x in range(1, dim + 1) if dim % x == 0]
+    return min(candidates, key=lambda x: abs((dim / x) - target_sub_dim))
+
+
 class ManifestLancedbModel(LanceModel):
     id: int = Field(default_factory=gen_id)
     name: Text = Field(description="The name of the database.")
@@ -154,6 +277,10 @@ class Lnclite:
         model_settings: "ModelSettings",
         max_tokens: int = DEFAULT_MAX_TOKENS,
         token_secret_key: Text = "__lnclite__",
+        vector_search_prefer: Literal[
+            "storage", "balanced", "accuracy", "latency"
+        ] = "balanced",
+        verbose: bool = False,
     ):
         self.lancedb_path = Path(lancedb_path)
         self._connection: lancedb.AsyncConnection | None = None
@@ -165,12 +292,14 @@ class Lnclite:
         self.model_settings = model_settings
         self.max_tokens = max_tokens
 
+        self._secret_key = token_secret_key
+        self.vector_search_prefer = vector_search_prefer
+        self.verbose = verbose
+
         self._document_lancedb_model: Type[LanceModel] = get_document_lancedb_model(
             self.model_settings.dimensions
         )
         self._manifest_lancedb_model = ManifestLancedbModel
-
-        self._secret_key = token_secret_key
 
     @classmethod
     async def build_from_dir(
@@ -208,6 +337,8 @@ class Lnclite:
             model_settings=model_settings,
             max_tokens=max_tokens,
         )
+
+        # Create manifest
         await lnclite.manifest.upsert(
             name=dataset_name,
             description=dataset_description,
@@ -215,6 +346,7 @@ class Lnclite:
             dimensions=model_settings.dimensions,
         )
 
+        # Create documents
         file_ingestor = FileIngestor()
         if extension_readers is not None:
             for extension, reader in extension_readers.items():
@@ -241,6 +373,8 @@ class Lnclite:
         if batch:
             await lnclite.documents.batch_create(batch)
             logger.info(f"Created {len(batch)} documents")
+
+        await lnclite.documents.create_index()
 
         return lnclite
 
@@ -364,6 +498,27 @@ class Documents:
             )
         return self._table
 
+    async def create_index(self) -> None:
+        table = await self.get_table()
+
+        await table.create_index("tags", config=lancedb.index.LabelList())
+
+        row_count = await self.count()
+
+        vs_config = recommended_vector_index_config(
+            row_count,
+            self.client.model_settings.dimensions,
+            prefer=self.client.vector_search_prefer,
+        )
+        if vs_config is None:
+            logger.info(
+                "Skipping vector index: row_count=%s is too small; brute-force search is exact and fast",  # noqa: E501
+                row_count,
+            )
+        else:
+            await table.create_index("vector", config=vs_config)
+            logger.info(f"Created vector index with config: {vs_config}")
+
     async def count(self) -> int:
         document_table = await self.get_table()
         return await document_table.count_rows()
@@ -423,6 +578,7 @@ class Documents:
         limit: int = 10,
         order: Literal["asc", "desc", 1, -1] = "asc",
         next_page_token: Optional[Text] = None,
+        verbose: bool = False,
     ) -> TokenPaginatic[Document]:
         valid_order: Literal["ASC", "DESC"] = (
             "ASC" if order in ("asc", 1) else "DESC" if order in ("desc", -1) else None
@@ -442,18 +598,18 @@ class Documents:
 
         document_table = await self.client.documents.get_table()
 
+        # Prepare query
         query_builder = document_table.query()
 
-        where_clause = (
-            f"id {valid_op} {after_id}" if after_id is not None else "id > 0"
-        ) + f" ORDER BY id {valid_order}"
-        logger.info(f"Query: {where_clause}")
+        query_builder = query_builder.where(
+            (f"id {valid_op} {after_id}" if after_id is not None else "id > 0")
+            + f" ORDER BY id {valid_order}"
+        ).limit(valid_limit + 1)
+        if verbose or self.client.verbose:
+            logger.info(f"Query plan: {await query_builder.explain_plan()}")
 
-        documents = await (
-            query_builder.where(where_clause)
-            .limit(valid_limit + 1)
-            .to_pydantic(self.client._document_lancedb_model)
-        )
+        # Execute query
+        documents = await query_builder.to_pydantic(self.client._document_lancedb_model)
 
         has_more = len(documents) > valid_limit
         documents = documents[:valid_limit]
