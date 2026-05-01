@@ -362,6 +362,24 @@ class Documents:
         document_table = await self.get_table()
         return await document_table.count_rows()
 
+    async def get(self, id: int) -> Document | None:
+        document_table = await self.get_table()
+        documents = await (
+            document_table.query()
+            .where(f"id = {id}")
+            .limit(1)
+            .to_pydantic(self.client._document_lancedb_model)
+        )
+        if len(documents) > 0:
+            return Document.model_validate_json(documents[0].model_dump_json())
+        return None
+
+    async def retrieve(self, id: int) -> Document:
+        might_document = await self.get(id)
+        if might_document is not None:
+            return might_document
+        raise LncliteNotFoundError(f"Document with id {id} not found")
+
     async def create(self, document_create: DocumentCreate) -> Document:
         return (await self.batch_create([document_create]))[0]
 
