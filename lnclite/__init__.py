@@ -22,6 +22,7 @@ from openai_embeddings_model import (
     AsyncOpenAIEmbeddingsModel,
     ModelSettings,
 )
+from openai_embeddings_model.normalize import normalize
 from pydantic import BaseModel, Field, model_validator
 
 if TYPE_CHECKING:
@@ -232,6 +233,7 @@ class Lnclite:
 
         if batch:
             await lnclite.documents.batch_create(batch)
+            logger.info(f"Created {len(batch)} documents")
 
         return lnclite
 
@@ -248,6 +250,27 @@ class Lnclite:
     @functools.cached_property
     def documents(self) -> "Documents":
         return Documents(self)
+
+    async def search(self, query: Text, *, limit: int = 5) -> "SearchResults":
+        document_table = await self.documents.get_table()
+
+        emb_res = await self.openai_embeddings_model.get_embeddings(
+            [query], model_settings=self.model_settings
+        )
+        query_vector = normalize(emb_res.to_numpy())[0]
+
+        search_query = await document_table.search(query_vector)
+        search_results: List[Dict] = (
+            await search_query.distance_type("dot").limit(limit).to_list()
+        )
+
+        results: List[SearchResult] = []
+        for result in search_results:
+            _doc = Document.model_validate(result)
+            _distance = result["_distance"]
+            results.append(SearchResult(document=_doc, distance=_distance))
+
+        return SearchResults(results=results)
 
 
 class Manifest:
@@ -336,27 +359,7 @@ class Documents:
         return await document_table.count_rows()
 
     async def create(self, document_create: DocumentCreate) -> Document:
-        document_table = await self.get_table()
-
-        emb_res = await self.client.openai_embeddings_model.get_embeddings(
-            document_create.content, model_settings=self.client.model_settings
-        )
-
-        document = self.client._document_lancedb_model(
-            content=document_create.content,
-            tags=document_create.tags,
-            metadata=document_create.metadata,
-            vector=emb_res.to_python()[0],
-        )
-
-        await document_table.add([document])
-
-        output = Document.model_validate_json(
-            document.model_dump_json(exclude_none=True)
-        )
-        output.vector = emb_res.output[0]  # In base64 format
-
-        return output
+        return (await self.batch_create([document_create]))[0]
 
     async def batch_create(
         self, document_creates: List[DocumentCreate]
@@ -367,25 +370,35 @@ class Documents:
             [d.content for d in document_creates],
             model_settings=self.client.model_settings,
         )
+        normalized_vectors = normalize(emb_res.to_numpy())  # (n, d)
 
         documents = [
             self.client._document_lancedb_model(
                 content=d.content, tags=d.tags, vector=v
             )
-            for d, v in zip(document_creates, emb_res.to_python())
+            for d, v in zip(document_creates, normalized_vectors)
         ]
 
         await document_table.add(documents)
 
         output: List[Document] = []
-        for document, v in zip(documents, emb_res.to_python()):
+        for document, v in zip(documents, normalized_vectors):
             _doc = Document.model_validate_json(
                 document.model_dump_json(exclude_none=True)
             )
-            _doc.vector = v
+            _doc.vector = v.tolist()
             output.append(_doc)
 
         return output
+
+
+class SearchResult(BaseModel):
+    document: Document
+    distance: float
+
+
+class SearchResults(BaseModel):
+    results: List[SearchResult]
 
 
 class LncliteNotFoundError(Exception):
