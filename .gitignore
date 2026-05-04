@@ -4,6 +4,7 @@
 .env.production
 .envrc
 data
+outputs
 poetry.lock
 
 # Byte-compiled / optimized / DLL files

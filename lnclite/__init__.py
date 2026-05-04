@@ -23,6 +23,7 @@ import numpy as np
 import tiktoken
 from lancedb.pydantic import LanceModel, Vector
 from openai import AsyncOpenAI
+from openai_embeddings_model import MAX_BATCH_SIZE as DEFAULT_EMBEDDINGS_MAX_BATCH_SIZE
 from openai_embeddings_model import (
     AsyncOpenAIEmbeddingsModel,
     ModelSettings,
@@ -42,7 +43,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_MANIFEST_TABLE = "manifest"
 DEFAULT_DOCUMENT_TABLE = "documents"
 DEFAULT_OPENAI_MODEL = "text-embedding-3-small"
-DEFAULT_MAX_TOKENS = 4096
+DEFAULT_MAX_INPUT_TOKENS = 4096
+DEFAULT_DIMENSIONS = 1536
 
 VectorIndexPreference = Literal["storage", "balanced", "accuracy", "latency"]
 ListOrder = Literal["asc", "desc", 1, -1]
@@ -76,40 +78,46 @@ def get_document_lancedb_model(dim: int) -> Type[LanceModel]:
 
 
 @functools.cache
-def get_default_openai_client() -> AsyncOpenAI:
+def get_openai_client() -> AsyncOpenAI:
     return AsyncOpenAI()
 
 
 @functools.cache
-def get_default_openai_embeddings_model_name() -> str:
-    return DEFAULT_OPENAI_MODEL
-
-
-@functools.cache
-def get_default_dimensions() -> int:
-    return 1536
-
-
-@functools.cache
-def get_default_embeddings_cache() -> diskcache.Cache:
+def get_embeddings_cache() -> diskcache.Cache:
     return diskcache.Cache(".cache/embeddings")
 
 
 @functools.cache
-def get_default_openai_embeddings_model() -> "AsyncOpenAIEmbeddingsModel":
+def get_encoding_for_model(model: str) -> tiktoken.Encoding:
+    try:
+        return tiktoken.encoding_for_model(model)
+    except KeyError:
+        logger.warning(
+            f"Encoding for model {model} not found, using default encoding 'gpt-5"
+        )
+        return tiktoken.encoding_for_model("gpt-5")
+
+
+def get_openai_embeddings_model(
+    model: str = DEFAULT_OPENAI_MODEL,
+    openai_client: AsyncOpenAI | None = None,
+    cache: diskcache.Cache | None = None,
+    encoding: tiktoken.Encoding | None = None,
+    max_batch_size: int = DEFAULT_EMBEDDINGS_MAX_BATCH_SIZE,
+    max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
+) -> "AsyncOpenAIEmbeddingsModel":
     return AsyncOpenAIEmbeddingsModel(
-        model=get_default_openai_embeddings_model_name(),
-        openai_client=get_default_openai_client(),
-        cache=get_default_embeddings_cache(),
-        encoding=tiktoken.encoding_for_model(
-            get_default_openai_embeddings_model_name()
-        ),
+        model=model,
+        openai_client=openai_client or get_openai_client(),
+        cache=cache or get_embeddings_cache(),
+        encoding=encoding or get_encoding_for_model(model),
+        max_batch_size=max_batch_size,
+        max_input_tokens=max_input_tokens,
     )
 
 
-@functools.cache
-def get_default_model_settings() -> "ModelSettings":
-    return ModelSettings(dimensions=get_default_dimensions())
+def get_model_settings(dimensions: int = DEFAULT_DIMENSIONS) -> "ModelSettings":
+    return ModelSettings(dimensions=dimensions)
 
 
 def quote_sql_string(s: str) -> str:
@@ -227,6 +235,16 @@ def recommended_num_sub_vectors(
     return min(candidates, key=lambda x: abs((dim / x) - target_sub_dim))
 
 
+async def get_default_dimensions(
+    openai_embeddings_model: AsyncOpenAIEmbeddingsModel,
+) -> int:
+    emb_result = await openai_embeddings_model.get_embeddings(
+        input="Hello, world!",
+        model_settings=ModelSettings(),
+    )
+    return emb_result.to_numpy().shape[1]
+
+
 class ManifestLancedbModel(LanceModel):
     id: int = Field(default_factory=gen_id)
     name: Text = Field(description="The name of the database.")
@@ -274,7 +292,6 @@ class Lnclite:
         document_table: Text = DEFAULT_DOCUMENT_TABLE,
         openai_embeddings_model: "AsyncOpenAIEmbeddingsModel",
         model_settings: "ModelSettings",
-        max_tokens: int = DEFAULT_MAX_TOKENS,
         token_secret_key: Text = "__lnclite__",
         vector_search_prefer: VectorIndexPreference = "balanced",
         verbose: bool = False,
@@ -287,19 +304,58 @@ class Lnclite:
 
         self.openai_embeddings_model = openai_embeddings_model
         self.model_settings = model_settings
-        self.max_tokens = max_tokens
+        self.max_tokens = self.openai_embeddings_model._max_input_tokens
 
         self._secret_key = token_secret_key
         self.vector_search_prefer = vector_search_prefer
         self.verbose = verbose
 
+        if self.model_settings.dimensions is None:
+            raise ValueError("Model settings dimensions is not set")
         self._document_lancedb_model: Type[LanceModel] = get_document_lancedb_model(
             self.model_settings.dimensions
         )
         self._manifest_lancedb_model = ManifestLancedbModel
 
     @classmethod
-    async def build_from_dir(
+    async def new(
+        cls,
+        lancedb_path: Path | str,
+        *,
+        manifest_table: Text = DEFAULT_MANIFEST_TABLE,
+        document_table: Text = DEFAULT_DOCUMENT_TABLE,
+        openai_embeddings_model: "AsyncOpenAIEmbeddingsModel",
+        model_settings: "ModelSettings",
+        token_secret_key: Text = "__lnclite__",
+        vector_search_prefer: VectorIndexPreference = "balanced",
+        verbose: bool = False,
+    ) -> "Lnclite":
+        lancedb_path = Path(lancedb_path)
+        if lancedb_path.is_dir():
+            # If not a empty directory, raise an error
+            for _ in lancedb_path.iterdir():
+                raise ValueError(f"Lancedb path {lancedb_path} already exists ")
+        else:
+            lancedb_path.mkdir(parents=True, exist_ok=True)
+
+        if model_settings.dimensions is None:
+            model_settings.dimensions = await get_default_dimensions(
+                openai_embeddings_model
+            )
+
+        return cls(
+            lancedb_path=lancedb_path,
+            manifest_table=manifest_table,
+            document_table=document_table,
+            openai_embeddings_model=openai_embeddings_model,
+            model_settings=model_settings,
+            token_secret_key=token_secret_key,
+            vector_search_prefer=vector_search_prefer,
+            verbose=verbose,
+        )
+
+    @classmethod
+    async def new_from_dir(
         cls,
         dir_path: Path | str,
         lancedb_path: Path | str,
@@ -310,7 +366,6 @@ class Lnclite:
         document_table: Text = DEFAULT_DOCUMENT_TABLE,
         openai_embeddings_model: "AsyncOpenAIEmbeddingsModel",
         model_settings: "ModelSettings",
-        max_tokens: int = DEFAULT_MAX_TOKENS,
         extension_readers: Optional[Dict[str, "FileReader"]] = None,
         batch_size: int = 100,
     ) -> "Lnclite":
@@ -326,13 +381,17 @@ class Lnclite:
             for _ in lancedb_path.iterdir():
                 raise ValueError(f"Lancedb path {lancedb_path} already exists ")
 
+        if model_settings.dimensions is None:
+            model_settings.dimensions = await get_default_dimensions(
+                openai_embeddings_model
+            )
+
         lnclite = cls(
             lancedb_path=lancedb_path,
             manifest_table=manifest_table,
             document_table=document_table,
             openai_embeddings_model=openai_embeddings_model,
             model_settings=model_settings,
-            max_tokens=max_tokens,
         )
 
         # Create manifest
@@ -375,6 +434,56 @@ class Lnclite:
 
         return lnclite
 
+    @classmethod
+    async def load(
+        cls,
+        lancedb_path: Path | str,
+        *,
+        manifest_table: Text = DEFAULT_MANIFEST_TABLE,
+        document_table: Text = DEFAULT_DOCUMENT_TABLE,
+        openai_embeddings_model: "AsyncOpenAIEmbeddingsModel",
+        model_settings: "ModelSettings",
+        vector_search_prefer: VectorIndexPreference = "balanced",
+        refresh_index: bool = False,
+        verbose: bool = False,
+    ) -> "Lnclite":
+        lancedb_path = Path(lancedb_path)
+        if not lancedb_path.is_dir():
+            raise FileNotFoundError(f"Lancedb path {lancedb_path} not found")
+
+        if model_settings.dimensions is None:
+            model_settings.dimensions = await get_default_dimensions(
+                openai_embeddings_model
+            )
+
+        lnclite = cls(
+            lancedb_path=lancedb_path,
+            manifest_table=manifest_table,
+            document_table=document_table,
+            openai_embeddings_model=openai_embeddings_model,
+            model_settings=model_settings,
+            vector_search_prefer=vector_search_prefer,
+            verbose=verbose,
+        )
+
+        # Validate manifest
+        manifest = await lnclite.manifest.get()
+        if manifest is None:
+            raise LncliteNotFoundError("Manifest not found")
+        if manifest.model != openai_embeddings_model.model:
+            raise ValueError(
+                f"OpenAI embeddings model mismatch: {manifest.model} != {openai_embeddings_model.model}"  # noqa: E501
+            )
+        if manifest.dimensions != model_settings.dimensions:
+            raise ValueError(
+                f"Model settings dimensions mismatch: {manifest.dimensions} != {model_settings.dimensions}"  # noqa: E501
+            )
+
+        if refresh_index:
+            await lnclite.documents.create_index()
+
+        return lnclite
+
     async def get_connection(self) -> lancedb.AsyncConnection:
         if self._connection is None:
             self._connection = await lancedb.connect_async(self.lancedb_path)
@@ -388,6 +497,9 @@ class Lnclite:
     @functools.cached_property
     def documents(self) -> "Documents":
         return Documents(self)
+
+    async def create_index(self) -> None:
+        await self.documents.create_index()
 
     async def embed(self, texts: List[Text]) -> np.ndarray:
         emb_res = await self.openai_embeddings_model.get_embeddings(
