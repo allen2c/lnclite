@@ -2,13 +2,10 @@
 
 import pytest
 import pytest_asyncio
+from openai import AsyncOpenAI
+from openai_embeddings_model import ModelSettings
 
-from lnclite import (
-    DocumentCreate,
-    Lnclite,
-    get_default_model_settings,
-    get_default_openai_embeddings_model,
-)
+from lnclite import DocumentCreate, Lnclite, get_openai_embeddings_model
 
 NEGATIVE_TESTING_DOC = """# Negative Testing and Error Path Validation
 
@@ -86,8 +83,10 @@ def tempfile_dir(tmp_path):
 def lnclite_client(tempfile_dir):
     return Lnclite(
         lancedb_path=tempfile_dir / "lancedb",
-        openai_embeddings_model=get_default_openai_embeddings_model(),
-        model_settings=get_default_model_settings(),
+        openai_embeddings_model=get_openai_embeddings_model(
+            openai_client=AsyncOpenAI(),
+        ),
+        model_settings=ModelSettings(dimensions=1536),
         token_secret_key="test-secret",
     )
 
