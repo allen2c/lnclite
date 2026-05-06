@@ -1,14 +1,17 @@
+"""Snowflake-style integer ID generation."""
+
 import hashlib
 import os
 import socket
 import threading
 import time
-from typing import Optional
 
-_global_generator: Optional["Snowflake"] = None
+_global_generator: "Snowflake | None" = None
 
 
 class Snowflake:
+    """Thread-safe Snowflake-style ID generator."""
+
     def __init__(self, worker_id: int):
         self.worker_id = worker_id
         self.sequence = 0
@@ -30,7 +33,7 @@ class Snowflake:
 
         self.lock = threading.Lock()
 
-    def _get_timestamp(self):
+    def _get_timestamp(self) -> int:
         return int(time.time() * 1000)
 
     def generate(self) -> int:
@@ -44,7 +47,7 @@ class Snowflake:
                 # Within the same millisecond, the sequence number increases
                 self.sequence = (self.sequence + 1) & self.sequence_mask
                 if self.sequence == 0:
-                    # If the sequence number is exhausted, wait for the next millisecond
+                    # Wait for the next millisecond when sequence is exhausted.
                     while timestamp <= self.last_timestamp:
                         timestamp = self._get_timestamp()
             else:
@@ -81,7 +84,7 @@ def get_valid_worker_id(max_bits: int = 10) -> int:
             return hash_int % (max_worker_id + 1)
 
     # Case 3: No WORKER_ID is set (forced fallback)
-    # Get the hostname of the machine as the唯一性依據
+    # Use hostname as the fallback uniqueness basis.
     hostname = socket.gethostname()
     hash_int = int(hashlib.md5(hostname.encode("utf-8")).hexdigest(), 16)
 

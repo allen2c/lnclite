@@ -1,3 +1,5 @@
+"""Public API tests."""
+
 import lnclite
 
 
@@ -5,7 +7,10 @@ def test_public_api_exports_release_surface():
     assert lnclite.__all__ == [
         "Document",
         "DocumentCreate",
+        "DocumentIndexPlan",
         "Lnclite",
+        "LncliteConfig",
+        "LncliteManager",
         "LncliteNotFoundError",
         "ManifestModel",
         "SearchResult",

@@ -1,3 +1,5 @@
+"""File fingerprint helpers."""
+
 from pathlib import Path
 
 import xxhash

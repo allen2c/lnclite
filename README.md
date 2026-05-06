@@ -34,6 +34,8 @@ async def main():
         lancedb_path="outputs/demo.lance",
         openai_embeddings_model=embeddings,
         model_settings=ModelSettings(dimensions=1536),
+        name="Demo",
+        description="Local demo documents",
     )
 
     await client.documents.batch_create(
@@ -60,6 +62,13 @@ async def main():
         print(result.document.content)
         print(result.document.tags)
         print(result.distance)
+
+    # Vectors are hidden in returned documents by default.
+    results_with_vectors = await client.search(
+        "How should I design vector search?",
+        include_vector=True,
+    )
+    print(len(results_with_vectors.results[0].document.vector))
 
 
 if __name__ == "__main__":

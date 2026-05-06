@@ -10,7 +10,6 @@ from typing import (
     AsyncGenerator,
     Awaitable,
     Callable,
-    Dict,
     Generator,
     TypeAlias,
     TypedDict,
@@ -36,19 +35,14 @@ class FileIngestor:
     """
 
     def __init__(self) -> None:
-        # Maps file extensions to specific parsing functions
-        self._custom_readers: Dict[str, FileReader] = {}
+        self._custom_readers: dict[str, FileReader] = {}
 
     def register_reader(self, extension: str, reader_func: FileReader) -> None:
         """Registers a handler for a specific file extension (e.g., '.pdf')."""
         self._custom_readers[extension.lower()] = reader_func
 
     def ingest(self, dir_path: str) -> Generator[FileIngestorResult, None, None]:
-        """
-        Iterates through the directory and yields documents as they are processed.
-        Yields:
-            Dict containing 'path' and 'content' keys.
-        """
+        """Yield readable file contents from a directory tree."""
         root = Path(dir_path)
 
         for file_path in root.rglob("*"):
@@ -110,7 +104,7 @@ class FileIngestor:
     def _is_binary(
         self, file_path: Path, chunk_size: int = DEFAULT_BINARY_PROBE_CHUNK_SIZE
     ) -> bool:
-        """Determines if a file is binary using null-byte detection and UTF-8 probing."""  # noqa: E501
+        """Detect binary files with null-byte and UTF-8 probes."""
         try:
             with open(file_path, "rb") as f:
                 chunk = f.read(chunk_size)
