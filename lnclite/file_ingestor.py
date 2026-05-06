@@ -83,7 +83,7 @@ class FileIngestor:
     async def ingest_async(
         self, dir_path: str
     ) -> AsyncGenerator[FileIngestorResult, None]:
-        """Async variant of ingest: walks the tree sync, reads via aiofiles."""
+        """Async variant of ingest: walks the tree sync, reads in worker threads."""
         root = Path(dir_path)
 
         for file_path in root.rglob("*"):

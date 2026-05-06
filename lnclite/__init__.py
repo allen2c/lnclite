@@ -37,6 +37,17 @@ if TYPE_CHECKING:
     from lnclite.file_ingestor import FileReader
 
 __version__: Final[Text] = "0.1.0"
+__all__: Final[List[Text]] = [
+    "Document",
+    "DocumentCreate",
+    "Lnclite",
+    "LncliteNotFoundError",
+    "ManifestModel",
+    "SearchResult",
+    "SearchResults",
+    "get_model_settings",
+    "get_openai_embeddings_model",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -417,8 +428,12 @@ class Lnclite:
                 logger.warning(f"Skipping {_file_path} due to empty content")
                 continue
 
+            relative_path = Path(_file_path).relative_to(dir_path).as_posix()
             batch.append(
-                DocumentCreate(content=_file_content, metadata={"path": _file_path})
+                DocumentCreate(
+                    content=_file_content,
+                    tags=[f"path:{relative_path}"],
+                )
             )
 
             if len(batch) >= batch_size:
