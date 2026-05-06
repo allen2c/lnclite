@@ -1,7 +1,6 @@
 [project]
 authors = [{ name = "Allen Chou", email = "f1470891079@gmail.com" }]
 dependencies = [
-  "fastapi[standard]",
   "lancedb",
   "openai",
   "openai-embeddings-model",
@@ -10,7 +9,8 @@ dependencies = [
   "xxhash",
 ]
 description = "Lite usages of lancedb."
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 name = "lnclite"
 readme = "README.md"
 requires-python = ">=3.11,<4"
@@ -23,9 +23,6 @@ Repository = "https://github.com/allen2c/lnclite"
 
 [tool.poetry]
 packages = [{ include = "lnclite" }]
-
-[tool.poetry.extras]
-all = []
 
 [tool.poetry.group.dev.dependencies]
 black = { extras = ["jupyter"], version = "*" }
@@ -46,6 +43,9 @@ twine = "*"
 
 [tool.isort]
 profile = "black"
+
+[tool.black]
+target-version = ["py311"]
 
 [tool.flake8]
 ignore = ["E203", "E704", "W503"]
