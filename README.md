@@ -1,6 +1,14 @@
 # lnclite
 
-`lnclite` is a small async LanceDB document store for OpenAI-compatible embeddings. It gives you a compact API for creating a local vector database, adding documents, filtering by tags, and running semantic search.
+[![PyPI](https://img.shields.io/pypi/v/lnclite.svg)](https://pypi.org/project/lnclite/)
+[![Python](https://img.shields.io/pypi/pyversions/lnclite.svg)](https://pypi.org/project/lnclite/)
+[![License](https://img.shields.io/github/license/allen2c/lnclite.svg)](LICENSE)
+[![CI](https://github.com/allen2c/lnclite/actions/workflows/ci.yml/badge.svg)](https://github.com/allen2c/lnclite/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://allen2c.github.io/lnclite/)
+
+`lnclite` is a small async LanceDB document store for OpenAI-compatible
+embeddings. It gives you a compact API for creating a local vector database,
+adding documents, filtering by tags, and running semantic search.
 
 ## Installation
 
@@ -77,7 +85,16 @@ if __name__ == "__main__":
 
 ## Documentation
 
-Full documentation is published with MkDocs Material from this repository's `docs/` directory.
+Full documentation is published at
+[`allen2c.github.io/lnclite`](https://allen2c.github.io/lnclite/).
+
+Useful pages:
+
+- [Installation](https://allen2c.github.io/lnclite/installation/)
+- [Basic usage](https://allen2c.github.io/lnclite/usage/basic/)
+- [Directory ingest](https://allen2c.github.io/lnclite/usage/ingest-directory/)
+- [Managing multiple stores](https://allen2c.github.io/lnclite/usage/manager/)
+- [API reference](https://allen2c.github.io/lnclite/api-reference/)
 
 ## Examples
 
