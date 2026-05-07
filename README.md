@@ -79,6 +79,12 @@ if __name__ == "__main__":
 
 Full documentation is published with MkDocs Material from this repository's `docs/` directory.
 
+## Examples
+
+Runnable end-to-end examples live in [`examples/`](examples/README.md). They
+cover basic search, tag filtering, directory ingest, managing multiple stores,
+and an optional downloaded open-dataset demo.
+
 ## License
 
 MIT
