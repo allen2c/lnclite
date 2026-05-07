@@ -1,11 +1,14 @@
 [project]
 authors = [{ name = "Allen Chou", email = "f1470891079@gmail.com" }]
 dependencies = [
+  "diskcache",
   "lancedb",
+  "numpy",
   "openai",
   "openai-embeddings-model",
   "paginatic",
   "pydantic (>=2)",
+  "tiktoken",
   "xxhash",
 ]
 description = "Lite usages of lancedb."
@@ -14,7 +17,7 @@ license-files = ["LICENSE"]
 name = "lnclite"
 readme = "README.md"
 requires-python = ">=3.11,<4"
-version = "0.1.0"
+version = "0.2.0"
 
 [project.urls]
 Homepage = "https://github.com/allen2c/lnclite"

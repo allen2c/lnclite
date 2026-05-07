@@ -1,3 +1,5 @@
+"""Folder fingerprint helpers."""
+
 import os
 from pathlib import Path
 
@@ -10,7 +12,7 @@ def get_folder_fingerprint(target_path: Path | str, read_content: bool = False) 
 
     # Keep traversal order stable; otherwise the same tree can hash differently
     # if os.walk yields files in a different order.
-    for root, dirs, files in os.walk(target_path):
+    for root, _dirs, files in os.walk(target_path):
         for names in sorted(files):
             file_path = os.path.join(root, names)
 
@@ -23,7 +25,7 @@ def get_folder_fingerprint(target_path: Path | str, read_content: bool = False) 
                 # Use content hashing only if you need stronger accuracy
                 # and can pay the I/O cost.
                 if read_content:
-                    # Catches changes where mtime/size might not move (rare edge cases).
+                    # Catches changes where mtime/size might not move.
                     with open(file_path, "rb") as f:
                         folder_hash.update(f.read())
                 else:

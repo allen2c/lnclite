@@ -18,6 +18,8 @@ async def main():
         lancedb_path="outputs/demo.lance",
         openai_embeddings_model=embeddings,
         model_settings=ModelSettings(dimensions=1536),
+        name="Demo",
+        description="Local demo documents",
     )
 
     await client.documents.batch_create(
@@ -48,6 +50,13 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+```
+
+Returned documents hide vectors by default to avoid unnecessary memory and
+serialization cost. Request vectors only when you need them:
+
+```python
+results = await client.search("How should I design vector search?", include_vector=True)
 ```
 
 Load an existing store with matching model settings:

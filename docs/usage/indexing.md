@@ -20,3 +20,13 @@ client = await Lnclite.new(
 ```
 
 Available preferences are `storage`, `balanced`, `accuracy`, and `latency`.
+
+Inspect the recommendation without creating an index:
+
+```python
+plan = await client.documents.index_plan()
+
+print(plan.row_count)
+print(plan.vector_index_kind)
+print(plan.should_create_vector_index)
+```
