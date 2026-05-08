@@ -16,7 +16,7 @@ from lnclite.models import (
     SearchResults,
 )
 
-__version__: Final[str] = "0.2.0"
+__version__: Final[str] = "0.2.1"
 __all__: Final[list[str]] = [
     "Document",
     "DocumentCreate",

@@ -1,5 +1,7 @@
 """Shared pytest fixtures for lnclite integration tests."""
 
+from types import SimpleNamespace
+
 import pytest
 import pytest_asyncio
 from openai import AsyncOpenAI
@@ -87,6 +89,19 @@ def lnclite_client(tempfile_dir):
             openai_client=AsyncOpenAI(),
         ),
         model_settings=ModelSettings(dimensions=1536),
+        token_secret_key="test-secret",
+    )
+
+
+@pytest.fixture
+def bulk_lnclite_client(tmp_path):
+    return Lnclite(
+        lancedb_path=tmp_path / "bulk.lance",
+        openai_embeddings_model=SimpleNamespace(
+            _max_input_tokens=8192,
+            model="test-embeddings",
+        ),
+        model_settings=ModelSettings(dimensions=4),
         token_secret_key="test-secret",
     )
 
