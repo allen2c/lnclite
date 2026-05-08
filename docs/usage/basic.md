@@ -59,6 +59,20 @@ serialization cost. Request vectors only when you need them:
 results = await client.search("How should I design vector search?", include_vector=True)
 ```
 
+For large ingestion jobs where you only need the final searchable table, use
+`batch_insert()` instead of `batch_create()`:
+
+```python
+inserted = await client.documents.batch_insert(
+    [
+        DocumentCreate(content="Large corpus document 1", tags=["source:corpus"]),
+        DocumentCreate(content="Large corpus document 2", tags=["source:corpus"]),
+    ],
+    verbose=True,
+)
+print(inserted)
+```
+
 Load an existing store with matching model settings:
 
 ```python

@@ -1,13 +1,21 @@
 """Documents collection API for lnclite stores."""
 
+import asyncio
+import contextlib
 import functools
 import hashlib
 import logging
+import time
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import lancedb
 import lancedb.index
+import numpy as np
+import pyarrow as pa
 from lancedb.pydantic import LanceModel, Vector
+from openai_embeddings_model.normalize import normalize
 from paginatic import TokenPaginatic
 from paginatic.helpers import decode_and_verify, encode_and_sign
 from pydantic import Field, model_validator
@@ -65,22 +73,27 @@ class Documents:
     def __init__(self, client: "Lnclite"):
         self.client = client
         self._table: lancedb.AsyncTable | None = None
+        self._table_lock = asyncio.Lock()
 
     async def get_table(self) -> lancedb.AsyncTable:
         if self._table is not None:
             return self._table
 
-        conn = await self.client.get_connection()
-        if await self.client.table_exists(self.client.document_table):
-            self._table = await conn.open_table(
-                self.client.document_table,
-                index_cache_size=self.client.index_cache_size,
-            )
-        else:
-            self._table = await conn.create_table(
-                self.client.document_table,
-                schema=self.client._document_lancedb_model,
-            )
+        async with self._table_lock:
+            if self._table is not None:
+                return self._table
+
+            conn = await self.client.get_connection()
+            if await self.client.table_exists(self.client.document_table):
+                self._table = await conn.open_table(
+                    self.client.document_table,
+                    index_cache_size=self.client.index_cache_size,
+                )
+            else:
+                self._table = await conn.create_table(
+                    self.client.document_table,
+                    schema=self.client._document_lancedb_model,
+                )
         return self._table
 
     async def index_plan(self):
@@ -147,31 +160,115 @@ class Documents:
     async def batch_create(
         self,
         document_creates: list[DocumentCreate],
+        *,
+        verbose: bool = False,
     ) -> list[Document]:
-        document_table = await self.get_table()
-        normalized_vectors = await self.client.embed(
-            [d.content for d in document_creates]
+        documents = await self._batch_add(
+            document_creates,
+            return_documents=True,
+            verbose=verbose,
+            operation="batch_create",
         )
+        return documents
 
-        documents = [
-            self.client._document_lancedb_model(
-                content=d.content,
-                tags=d.tags,
-                vector=v,
-            )
-            for d, v in zip(document_creates, normalized_vectors)
-        ]
+    async def batch_insert(
+        self,
+        document_creates: list[DocumentCreate],
+        *,
+        verbose: bool = False,
+    ) -> int:
+        await self._batch_add(
+            document_creates,
+            return_documents=False,
+            verbose=verbose,
+            operation="batch_insert",
+        )
+        return len(document_creates)
 
-        await document_table.add(documents)
+    async def batch_insert_embedded(
+        self,
+        document_creates: list[DocumentCreate],
+        vectors: np.ndarray | Sequence[Sequence[float]],
+        *,
+        normalize_vectors: bool = True,
+        verbose: bool = False,
+    ) -> int:
+        if not document_creates:
+            return 0
+
+        timings: dict[str, float] = {}
+        with _timed(timings, "total"):
+            with _timed(timings, "get_table"):
+                document_table = await self.get_table()
+            with _timed(timings, "normalize_vectors"):
+                vector_array = _coerce_vectors(
+                    vectors,
+                    expected_count=len(document_creates),
+                    expected_dimensions=self.client.model_settings.dimensions,
+                    normalize_vectors=normalize_vectors,
+                )
+            with _timed(timings, "row_construction"):
+                rows = _documents_to_arrow(
+                    document_creates,
+                    vector_array,
+                    dimensions=self.client.model_settings.dimensions,
+                )
+            with _timed(timings, "table_add"):
+                await document_table.add(rows)
+
+        _log_timings(
+            "batch_insert_embedded",
+            timings,
+            enabled=verbose or self.client.verbose,
+        )
+        return len(document_creates)
+
+    async def _batch_add(
+        self,
+        document_creates: list[DocumentCreate],
+        *,
+        return_documents: bool,
+        verbose: bool,
+        operation: str,
+    ) -> list[Document]:
+        if not document_creates:
+            return []
 
         output: list[Document] = []
-        for document, vector in zip(documents, normalized_vectors):
-            created = Document.model_validate_json(
-                document.model_dump_json(exclude_none=True)
-            )
-            created.vector = vector.tolist()
-            output.append(created)
+        timings: dict[str, float] = {}
+        with _timed(timings, "total"):
+            with _timed(timings, "get_table"):
+                document_table = await self.get_table()
+            with _timed(timings, "embed"):
+                vectors = await self.client.embed([d.content for d in document_creates])
+            with _timed(timings, "row_construction"):
+                vectors = _coerce_vectors(
+                    vectors,
+                    expected_count=len(document_creates),
+                    expected_dimensions=self.client.model_settings.dimensions,
+                    normalize_vectors=False,
+                )
+                rows, row_models = _document_rows_to_arrow_and_models(
+                    document_creates,
+                    vectors,
+                    dimensions=self.client.model_settings.dimensions,
+                )
+            with _timed(timings, "table_add"):
+                await document_table.add(rows)
+            if return_documents:
+                with _timed(timings, "return_construction"):
+                    output = [
+                        Document(
+                            id=row.id,
+                            content=row.content,
+                            md5=row.md5,
+                            vector=vector.tolist(),
+                            tags=row.tags,
+                        )
+                        for row, vector in zip(row_models, vectors)
+                    ]
 
+        _log_timings(operation, timings, enabled=verbose or self.client.verbose)
         return output
 
     async def list(
@@ -236,3 +333,117 @@ def _generate_id() -> int:
     from lnclite.utils.snowflake import generate_id
 
     return generate_id()
+
+
+@contextlib.contextmanager
+def _timed(timings: dict[str, float], phase: str) -> Iterator[None]:
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        timings[phase] = time.perf_counter() - start
+
+
+def _coerce_vectors(
+    vectors: np.ndarray | Sequence[Sequence[float]],
+    *,
+    expected_count: int,
+    expected_dimensions: int,
+    normalize_vectors: bool,
+) -> np.ndarray:
+    vector_array = np.asarray(vectors, dtype=np.float32)
+    if vector_array.ndim != 2:
+        raise ValueError(f"Expected 2-dimensional vectors, got {vector_array.ndim}")
+    if vector_array.shape[0] != expected_count:
+        raise ValueError(
+            f"Expected {expected_count} vectors, got {vector_array.shape[0]}"
+        )
+    if vector_array.shape[1] != expected_dimensions:
+        raise ValueError(
+            f"Expected vectors with {expected_dimensions} dimensions, "
+            f"got {vector_array.shape[1]}"
+        )
+    if normalize_vectors:
+        vector_array = normalize(vector_array)
+    return vector_array
+
+
+def _documents_to_arrow(
+    document_creates: list[DocumentCreate],
+    vectors: np.ndarray,
+    *,
+    dimensions: int,
+) -> pa.Table:
+    row_models = _document_row_models(document_creates)
+    return _document_row_models_to_arrow(row_models, vectors, dimensions=dimensions)
+
+
+def _document_rows_to_arrow_and_models(
+    document_creates: list[DocumentCreate],
+    vectors: np.ndarray,
+    *,
+    dimensions: int,
+) -> tuple[pa.Table, list["_DocumentRow"]]:
+    row_models = _document_row_models(document_creates)
+    return (
+        _document_row_models_to_arrow(row_models, vectors, dimensions=dimensions),
+        row_models,
+    )
+
+
+def _document_row_models(
+    document_creates: list[DocumentCreate],
+) -> list["_DocumentRow"]:
+    return [
+        _DocumentRow(
+            id=_generate_id(),
+            content=document_create.content,
+            md5=hashlib.md5(document_create.content.encode()).hexdigest(),
+            tags=document_create.tags,
+        )
+        for document_create in document_creates
+    ]
+
+
+def _document_row_models_to_arrow(
+    row_models: list["_DocumentRow"],
+    vectors: np.ndarray,
+    *,
+    dimensions: int,
+) -> pa.Table:
+    flattened_vectors = pa.array(vectors.reshape(-1), type=pa.float32())
+    fixed_vectors = pa.FixedSizeListArray.from_arrays(flattened_vectors, dimensions)
+    return pa.table(
+        {
+            "id": pa.array([row.id for row in row_models], type=pa.int64()),
+            "content": pa.array([row.content for row in row_models], type=pa.string()),
+            "md5": pa.array([row.md5 for row in row_models], type=pa.string()),
+            "vector": fixed_vectors,
+            "tags": pa.array(
+                [row.tags for row in row_models], type=pa.list_(pa.string())
+            ),
+        }
+    )
+
+
+def _log_timings(
+    operation: str,
+    timings: dict[str, float],
+    *,
+    enabled: bool,
+) -> None:
+    if not enabled:
+        return
+    logger.info(
+        "%s timings: %s",
+        operation,
+        " ".join(f"{phase}={elapsed:.6f}s" for phase, elapsed in timings.items()),
+    )
+
+
+@dataclass(frozen=True)
+class _DocumentRow:
+    id: int
+    content: str
+    md5: str
+    tags: list[str]
