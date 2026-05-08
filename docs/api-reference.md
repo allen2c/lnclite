@@ -22,10 +22,18 @@ Applications should implement those concerns outside the library.
 
 - `await client.documents.create(document_create)`: add one document.
 - `await client.documents.batch_create(document_creates)`: add many documents.
+- `await client.documents.batch_insert(document_creates)`: add many documents and return only the inserted count.
+- `await client.documents.batch_insert_embedded(document_creates, vectors, normalize_vectors=True)`: add documents with caller-supplied vectors and return only the inserted count.
 - `await client.documents.get(id, include_vector=False)`: return a document or `None`.
 - `await client.documents.retrieve(id, include_vector=False)`: return a document or raise `LncliteNotFoundError`.
 - `await client.documents.list(..., include_vector=False)`: list documents with pagination and tag filters.
 - `await client.documents.index_plan()`: inspect recommended index behavior.
+
+Use `batch_insert()` or `batch_insert_embedded()` for large ingestion workloads
+where returned `Document` objects are not needed. Pass `verbose=True` to
+`batch_create()`, `batch_insert()`, or `batch_insert_embedded()` to log phase
+timings for table access, embedding, normalization, row construction, LanceDB
+append, and return-object construction when applicable.
 
 ## Models
 

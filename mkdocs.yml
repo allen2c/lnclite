@@ -19,6 +19,7 @@ nav:
   - Installation: installation.md
   - Usage:
       - Basic Usage: usage/basic.md
+      - Bulk Ingestion: usage/bulk-ingestion.md
       - Tags: usage/tags.md
       - Indexing: usage/indexing.md
       - Directory Ingest: usage/ingest-directory.md
